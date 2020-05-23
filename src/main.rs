@@ -1,6 +1,20 @@
-use std::io::{Read, Write, Seek, BufWriter, Cursor};
+use std::io::{Read, Write, Seek, SeekFrom, BufWriter, Cursor};
+use std::fs::File;
+use std::io;
+use std::env;
+use std::process;
 fn main() {
-    println!("Hello, world!");
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        println!("no filename");
+        process::exit(1);
+    }
+
+    let f = File::open(&args[1])
+        .expect("cannot open file");
+
+    let mut interpreter = Interpreter::new(f, io::stdin(), io::stdout());
+    interpreter.execute().unwrap();
 }
 
 #[derive(Debug)]
@@ -11,16 +25,19 @@ pub enum Error {
     UnknownOperator(String),
 }
 
-pub struct Interpreter<T, U, V>
-    where T: Read + Seek,
-          U: Read,
-          V: Write,
+pub struct Interpreter<T, U, V> where 
+    T: Read + Seek,
+    U: Read,
+    V: Write,
 {
     program: T,
     stdin: U,
     stdout: V,
     memory: Vec<u8>,
     index: usize,
+    skip: bool,
+    stack: Vec<usize>,
+    current: usize,
 }
 
 impl<T: Read + Seek, U: Read, V: Write> Interpreter<T, U, V> {
@@ -31,12 +48,15 @@ impl<T: Read + Seek, U: Read, V: Write> Interpreter<T, U, V> {
             stdout,
             memory: vec![0],
             index: 0,
+            skip: false,
+            stack: Vec::new(),
+            current: 0,
         }
     }
 
     pub fn execute(&mut self) -> Result<(), Error> {
         loop {
-            match self.next() {
+            match self.read() {
                 Some(operator) => self.operate(operator)?,
                 None => { return Ok(()); },
             }
@@ -44,7 +64,10 @@ impl<T: Read + Seek, U: Read, V: Write> Interpreter<T, U, V> {
     }
 
     fn operate(&mut self, operator: u8) -> Result<(), Error> {
-        println!("{}", operator);
+        if self.skip && operator != b']' {
+            self.skip = false;
+            return Ok(())
+        }
         match operator {
             b'>' => {
                 self.index += 1;
@@ -58,23 +81,37 @@ impl<T: Read + Seek, U: Read, V: Write> Interpreter<T, U, V> {
                 }
                 self.index -= 1;
             },
-            b'+' => self.memory[self.index] += 1,
-            b'-' => self.memory[self.index] -= 1,
+            b'+' => self.add(true),
+            b'-' => self.add(false),
             b'.' => {
-                if self.stdout.write(&[self.memory[self.index]]).is_err() {
+                if self.stdout.write(&[self.get()]).is_err() {
                     return Err(Error::WriteError)
                 }
                 return Ok(()) 
             },
             b',' => {
                 if let Some(byte) = self.read_byte() {
-                    self.memory[self.index] = byte;
+                    self.set(byte);
                 } else {
                     return Err(Error::ReadError);
                 }
             },
-            0 => (),
-            _ => { return Err(Error::UnknownOperator(format!("{}", operator))) },
+            b'[' => {
+                if self.get() == 0 {
+                    self.skip = true;
+                } else {
+                    self.stack.push(self.current);
+                }
+            },
+            b']' => {
+                if self.get() != 0 {
+                    self.goback();
+                } else {
+                    self.stack.pop();
+                }
+            }
+            // _ => { return Err(Error::UnknownOperator(String::from_utf8(vec![operator]).unwrap())) },
+            _ => (),
         }
         Ok(())
     }
@@ -86,23 +123,33 @@ impl<T: Read + Seek, U: Read, V: Write> Interpreter<T, U, V> {
             Err(_) => None,
         }
     }
-}
 
-impl<T, U, V> Iterator for Interpreter<T, U, V> where
-    T: Read + Seek,
-    U: Read,
-    V: Write,
-{
-    type Item = u8;
-    fn next(&mut self) -> Option<Self::Item> {
+    fn get(&self) -> u8 {
+        return self.memory[self.index]
+    }
+
+    fn set(&mut self, value: u8) {
+        self.memory[self.index] = value
+    }
+
+    fn add(&mut self, positive: bool) {
+        if positive { self.memory[self.index] += 1 } else { self.memory[self.index] -= 1 }
+    }
+
+    fn read(&mut self) -> Option<u8> {
         let mut v = [0; 1];
-        match self.program.read(&mut v) {
-            Ok(n) => {
-                if n != 1 { return None }
-                Some(v[0])
-            },
-            Err(_) => None,
+        if let Ok(n) = self.program.read(&mut v) {
+            if n == 1 {
+                self.current += 1;
+                return Some(v[0]); 
+            }
         }
+        None
+    }
+
+    fn goback(&mut self) {
+        let index = self.stack[self.stack.len()-1];
+        self.program.seek(SeekFrom::Start(index as u64)).unwrap();
     }
 }
 
@@ -123,9 +170,23 @@ fn test_io() {
 }
 
 #[test]
+fn test_plus() {
+    let code = String::from(",++.");
+    let input = String::from("a");
+    assert_eq!("c", execute_from_string(code, input).unwrap());
+}
+#[test]
 fn test_helloworld() {
     let code = "++++++++++[>+++++++>++++++++++>+++>+<<<<-]
 >++.>+.+++++++..+++.>++.<<+++++++++++++++.
 >.+++.------.--------.>+.>.".to_string();
-    assert_eq!("Hello World!", execute_from_string(code, "".to_string()).unwrap());
+    assert_eq!("Hello World!\n", execute_from_string(code, "".to_string()).unwrap());
 }
+
+#[test]
+fn test_upper_case() {
+    let code = ",----------[----------------------.,----------]".to_string();
+    let input = "wancat\n".to_string();
+    assert_eq!("WANCAT", execute_from_string(code, input).unwrap());
+}
+
