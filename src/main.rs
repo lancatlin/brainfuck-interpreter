@@ -1,8 +1,9 @@
-use std::io::{Read, Write, Seek, SeekFrom, BufWriter, Cursor};
+use std::io::{Read, Write, Seek, SeekFrom};
 use std::fs::File;
 use std::io;
 use std::env;
 use std::process;
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
@@ -19,10 +20,6 @@ fn main() {
 
 #[derive(Debug)]
 pub enum Error {
-    MemoryError,
-    WriteError,
-    ReadError,
-    UnknownOperator(String),
 }
 
 pub struct Interpreter<T, U, V> where 
@@ -35,9 +32,13 @@ pub struct Interpreter<T, U, V> where
     stdout: V,
     memory: Vec<u8>,
     index: usize,
-    skip: bool,
-    stack: Vec<usize>,
+    stack: Vec<Stack>,
     current: usize,
+}
+
+enum Stack {
+    Skip,
+    Index(usize),
 }
 
 impl<T: Read + Seek, U: Read, V: Write> Interpreter<T, U, V> {
@@ -48,7 +49,6 @@ impl<T: Read + Seek, U: Read, V: Write> Interpreter<T, U, V> {
             stdout,
             memory: vec![0],
             index: 0,
-            skip: false,
             stack: Vec::new(),
             current: 0,
         }
@@ -63,77 +63,74 @@ impl<T: Read + Seek, U: Read, V: Write> Interpreter<T, U, V> {
         }
     }
 
+    fn forward(&mut self) {
+        self.index += 1;
+        if self.index == self.memory.len() {
+            self.memory.push(0);
+        }
+    }
+
+    fn backward(&mut self) {
+        if self.index != 0 {
+            self.index -= 1;
+        }
+    }
+
+    fn write(&mut self) {
+        self.stdout.write(&[self.get()])
+            .expect("write error");
+    }
+
+    fn push(&mut self) {
+        self.stack.push(
+            if self.get() == 0 {
+                Stack::Skip
+            } else {
+                Stack::Index(self.current)
+            }
+        );
+    }
+
+    fn pop_or_goback(&mut self) {
+        if self.skip() || self.get() == 0 {
+            self.stack.pop();
+        } else {
+            self.goback();
+        }
+    }
+
     fn operate(&mut self, operator: u8) -> Result<(), Error> {
-        if self.skip && operator != b']' {
-            self.skip = false;
+        if self.skip() && operator != b']' && operator != b'[' {
             return Ok(())
         }
+
         match operator {
-            b'>' => {
-                self.index += 1;
-                if self.index == self.memory.len() {
-                    self.memory.push(0);
-                }
-            },
-            b'<' => {
-                if self.index == 0 {
-                    return Err(Error::MemoryError);
-                }
-                self.index -= 1;
-            },
-            b'+' => self.add(true),
-            b'-' => self.add(false),
-            b'.' => {
-                if self.stdout.write(&[self.get()]).is_err() {
-                    return Err(Error::WriteError)
-                }
-                return Ok(()) 
-            },
-            b',' => {
-                if let Some(byte) = self.read_byte() {
-                    self.set(byte);
-                } else {
-                    return Err(Error::ReadError);
-                }
-            },
-            b'[' => {
-                if self.get() == 0 {
-                    self.skip = true;
-                } else {
-                    self.stack.push(self.current);
-                }
-            },
-            b']' => {
-                if self.get() != 0 {
-                    self.goback();
-                } else {
-                    self.stack.pop();
-                }
-            }
-            // _ => { return Err(Error::UnknownOperator(String::from_utf8(vec![operator]).unwrap())) },
+            b'>' => self.forward(),
+            b'<' => self.backward(),
+            b'+' => self.memory[self.index] += 1,
+            b'-' => self.memory[self.index] -= 1,
+            b'.' => self.write(),
+            b',' => self.read_byte(),
+            b'[' => self.push(),
+            b']' => self.pop_or_goback(),
             _ => (),
         }
         Ok(())
     }
 
-    fn read_byte(&mut self) -> Option<u8> {
+    fn read_byte(&mut self) {
         let mut v = [0; 1];
-        match self.stdin.read(&mut v) {
-            Ok(_) => Some(v[0]),
-            Err(_) => None,
-        }
-    }
-
-    fn get(&self) -> u8 {
-        return self.memory[self.index]
+        self.stdin.read(&mut v).
+            expect("read error");
+        self.set(v[0]);
     }
 
     fn set(&mut self, value: u8) {
         self.memory[self.index] = value
     }
 
-    fn add(&mut self, positive: bool) {
-        if positive { self.memory[self.index] += 1 } else { self.memory[self.index] -= 1 }
+    fn get(&self) -> u8 {
+        return self.memory[self.index]
     }
 
     fn read(&mut self) -> Option<u8> {
@@ -148,45 +145,76 @@ impl<T: Read + Seek, U: Read, V: Write> Interpreter<T, U, V> {
     }
 
     fn goback(&mut self) {
-        let index = self.stack[self.stack.len()-1];
-        self.program.seek(SeekFrom::Start(index as u64)).unwrap();
+        match self.status() {
+            Stack::Index(index) => {
+                self.current = *index;
+                self.program.seek(SeekFrom::Start(self.current as u64)).unwrap();
+            },
+            _ => ()
+        }
+    }
+
+    fn status(&self) -> &Stack {
+        &self.stack[self.stack.len()-1]
+    }
+
+    fn skip(&self) -> bool {
+        if self.stack.is_empty() {
+            return false
+        }
+        match self.status() {
+            Stack::Skip => true,
+            Stack::Index(_) => false,
+        }
     }
 }
 
-fn execute_from_string(program: String, input: String) -> Result<String, Error> {
-    let program = Cursor::new(program.as_bytes());
-    let input = Cursor::new(input.as_bytes());
-    let output = BufWriter::new(Vec::new());
-    let mut interpreter = Interpreter::new(program, input, output);
-    interpreter.execute()?;
-    Ok(String::from_utf8(interpreter.stdout.buffer().to_vec()).unwrap())
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufWriter, Cursor};
+    fn execute_from_string(program: String, input: String) -> Result<String, Error> {
+        let program = Cursor::new(program.as_bytes());
+        let input = Cursor::new(input.as_bytes());
+        let output = BufWriter::new(Vec::new());
+        let mut interpreter = Interpreter::new(program, input, output);
+        interpreter.execute()?;
+        Ok(String::from_utf8(interpreter.stdout.buffer().to_vec()).unwrap())
+    }
 
-#[test]
-fn test_io() {
-    let code = String::from(",.");
-    let input = String::from("a");
-    assert_eq!("a", execute_from_string(code, input).unwrap());
-}
+    #[test]
+    fn test_io() {
+        let code = String::from(",.");
+        let input = String::from("a");
+        assert_eq!("a", execute_from_string(code, input).unwrap());
+    }
 
-#[test]
-fn test_plus() {
-    let code = String::from(",++.");
-    let input = String::from("a");
-    assert_eq!("c", execute_from_string(code, input).unwrap());
-}
-#[test]
-fn test_helloworld() {
-    let code = "++++++++++[>+++++++>++++++++++>+++>+<<<<-]
+    #[test]
+    fn test_plus() {
+        let code = String::from(",++.");
+        let input = String::from("a");
+        assert_eq!("c", execute_from_string(code, input).unwrap());
+    }
+    #[test]
+    fn test_helloworld() {
+        let code = "++++++++++[>+++++++>++++++++++>+++>+<<<<-]
 >++.>+.+++++++..+++.>++.<<+++++++++++++++.
 >.+++.------.--------.>+.>.".to_string();
-    assert_eq!("Hello World!\n", execute_from_string(code, "".to_string()).unwrap());
-}
+        assert_eq!("Hello World!\n", execute_from_string(code, "".to_string()).unwrap());
+    }
 
-#[test]
-fn test_upper_case() {
-    let code = ",----------[----------------------.,----------]".to_string();
-    let input = "wancat\n".to_string();
-    assert_eq!("WANCAT", execute_from_string(code, input).unwrap());
+    #[test]
+    fn test_upper_case() {
+        let code = ",----------[----------------------.,----------]".to_string();
+        let input = "wancat\n".to_string();
+        assert_eq!("WANCAT", execute_from_string(code, input).unwrap());
+    }
+
+    #[test]
+    fn test_double_loop() {
+        let code = "++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<]<-]>>.>---.+++++++..+++.>>.<-.<.+++.------.--------.>>+.>++.".to_string();
+        let input = "".to_string();
+        assert_eq!("Hello World!\n", execute_from_string(code, input).unwrap());
+    }
 }
 
