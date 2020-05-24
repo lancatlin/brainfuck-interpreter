@@ -11,8 +11,15 @@ fn main() {
         process::exit(1);
     }
 
-    let f = File::open(&args[1]).expect("cannot open file");
+    match File::open(&args[1]) {
+        Ok(f) => {
+            let mut interpreter = brainfuck::Interpreter::new(f, io::stdin(), io::stdout());
+            interpreter.execute().unwrap();
+        },
+        Err(e) => {
+            println!("Open file error: {}", e);
+            process::exit(1);
+        },
+    }
 
-    let mut interpreter = brainfuck::Interpreter::new(f, io::stdin(), io::stdout());
-    interpreter.execute().unwrap();
 }

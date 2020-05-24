@@ -1,15 +1,14 @@
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 
 #[derive(Debug)]
 pub enum Error {}
 
-pub struct Interpreter<T, U, V>
+pub struct Interpreter<U, V>
 where
-    T: Read + Seek,
     U: Read,
     V: Write,
 {
-    program: T,
+    program: Vec<u8>,
     stdin: U,
     stdout: V,
     memory: Vec<u8>,
@@ -23,10 +22,12 @@ enum Stack {
     Index(usize),
 }
 
-impl<T: Read + Seek, U: Read, V: Write> Interpreter<T, U, V> {
-    pub fn new(program: T, stdin: U, stdout: V) -> Interpreter<T, U, V> {
+impl<U: Read, V: Write> Interpreter<U, V> {
+    pub fn new<T: Read>(mut program: T, stdin: U, stdout: V) -> Interpreter<U, V> {
+        let mut v = Vec::new();
+        program.read_to_end(&mut v).expect("Read program fatal");
         Interpreter {
-            program,
+            program: v,
             stdin,
             stdout,
             memory: vec![0],
@@ -38,7 +39,7 @@ impl<T: Read + Seek, U: Read, V: Write> Interpreter<T, U, V> {
 
     pub fn execute(&mut self) -> Result<(), Error> {
         loop {
-            match self.read() {
+            match self.next() {
                 Some(operator) => self.operate(operator)?,
                 None => {
                     return Ok(());
@@ -47,15 +48,14 @@ impl<T: Read + Seek, U: Read, V: Write> Interpreter<T, U, V> {
         }
     }
 
-    fn read(&mut self) -> Option<u8> {
-        let mut v = [0; 1];
-        if let Ok(n) = self.program.read(&mut v) {
-            if n == 1 {
+    fn next(&mut self) -> Option<u8> {
+        match self.program.get(self.current) {
+            Some(value) => {
                 self.current += 1;
-                return Some(v[0]);
-            }
+                Some(*value)
+            },
+            None => None,
         }
-        None
     }
 
     fn operate(&mut self, operator: u8) -> Result<(), Error> {
@@ -128,11 +128,8 @@ impl<T: Read + Seek, U: Read, V: Write> Interpreter<T, U, V> {
         match self.status() {
             Stack::Index(index) => {
                 self.current = *index;
-                self.program
-                    .seek(SeekFrom::Start(self.current as u64))
-                    .unwrap();
             }
-            _ => (),
+            Stack::Skip => panic!("Should not goback here"),
         }
     }
 
