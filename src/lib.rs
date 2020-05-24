@@ -25,7 +25,7 @@ enum Stack {
 
 impl<T: Read + Seek, U: Read, V: Write> Interpreter<T, U, V> {
     pub fn new(program: T, stdin: U, stdout: V) -> Interpreter<T, U, V> {
-        return Interpreter {
+        Interpreter {
             program,
             stdin,
             stdout,
@@ -33,7 +33,7 @@ impl<T: Read + Seek, U: Read, V: Write> Interpreter<T, U, V> {
             index: 0,
             stack: Vec::new(),
             current: 0,
-        };
+        }
     }
 
     pub fn execute(&mut self) -> Result<(), Error> {
@@ -45,6 +45,36 @@ impl<T: Read + Seek, U: Read, V: Write> Interpreter<T, U, V> {
                 }
             }
         }
+    }
+
+    fn read(&mut self) -> Option<u8> {
+        let mut v = [0; 1];
+        if let Ok(n) = self.program.read(&mut v) {
+            if n == 1 {
+                self.current += 1;
+                return Some(v[0]);
+            }
+        }
+        None
+    }
+
+    fn operate(&mut self, operator: u8) -> Result<(), Error> {
+        if self.skip() && operator != b']' && operator != b'[' {
+            return Ok(());
+        }
+
+        match operator {
+            b'>' => self.forward(),
+            b'<' => self.backward(),
+            b'+' => self.memory[self.index] += 1,
+            b'-' => self.memory[self.index] -= 1,
+            b'.' => self.write_to_output(),
+            b',' => self.read_from_input(),
+            b'[' => self.push_stack(),
+            b']' => self.pop_or_goback(),
+            _ => (),
+        }
+        Ok(())
     }
 
     fn forward(&mut self) {
@@ -60,11 +90,17 @@ impl<T: Read + Seek, U: Read, V: Write> Interpreter<T, U, V> {
         }
     }
 
-    fn write(&mut self) {
+    fn write_to_output(&mut self) {
         self.stdout.write(&[self.get()]).expect("write error");
     }
 
-    fn push(&mut self) {
+    fn read_from_input(&mut self) {
+        let mut v = [0; 1];
+        self.stdin.read(&mut v).expect("read error");
+        self.set(v[0]);
+    }
+
+    fn push_stack(&mut self) {
         self.stack.push(if self.get() == 0 {
             Stack::Skip
         } else {
@@ -80,48 +116,12 @@ impl<T: Read + Seek, U: Read, V: Write> Interpreter<T, U, V> {
         }
     }
 
-    fn operate(&mut self, operator: u8) -> Result<(), Error> {
-        if self.skip() && operator != b']' && operator != b'[' {
-            return Ok(());
-        }
-
-        match operator {
-            b'>' => self.forward(),
-            b'<' => self.backward(),
-            b'+' => self.memory[self.index] += 1,
-            b'-' => self.memory[self.index] -= 1,
-            b'.' => self.write(),
-            b',' => self.read_byte(),
-            b'[' => self.push(),
-            b']' => self.pop_or_goback(),
-            _ => (),
-        }
-        Ok(())
-    }
-
-    fn read_byte(&mut self) {
-        let mut v = [0; 1];
-        self.stdin.read(&mut v).expect("read error");
-        self.set(v[0]);
-    }
-
     fn set(&mut self, value: u8) {
         self.memory[self.index] = value
     }
 
     fn get(&self) -> u8 {
-        return self.memory[self.index];
-    }
-
-    fn read(&mut self) -> Option<u8> {
-        let mut v = [0; 1];
-        if let Ok(n) = self.program.read(&mut v) {
-            if n == 1 {
-                self.current += 1;
-                return Some(v[0]);
-            }
-        }
-        None
+        self.memory[self.index]
     }
 
     fn goback(&mut self) {
